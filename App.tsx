@@ -1,13 +1,17 @@
+
 import React, { useState, useRef, useEffect } from 'react';
+import { GoogleGenAI, LiveSession, LiveServerMessage, Modality, Blob as GenaiBlob } from "@google/genai";
 import type { Message, GroundingChunk, ChatSession } from './types';
-import { sendMessageStream, transcribeAudio, generateSpeech } from './services/geminiService';
+import { sendMessageStream, transcribeAudio, generateSpeech, generateChatTitle, clearChatCache } from './services/geminiService';
 import Sidebar from './components/Sidebar';
 import ChatMessage from './components/ChatMessage';
 import ChatInput from './components/ChatInput';
 import LoginScreen from './components/LoginScreen';
 import MenuIcon from './components/icons/MenuIcon';
-import XIcon from './components/icons/XIcon';
-import AboutPage from './components/AboutPage';
+import SettingsPage from './components/SettingsPage';
+import WelcomeModal from './components/WelcomeModal';
+import AutonexBrand from './components/AutonexBrand';
+import PreviewModal from './components/PreviewModal';
 
 // Helper function to decode Base64
 function decodeBase64(base64: string) {
@@ -19,6 +23,30 @@ function decodeBase64(base64: string) {
   }
   return bytes;
 }
+
+// Helper to encode Uint8Array to Base64
+function encodeToBase64(bytes: Uint8Array) {
+  let binary = '';
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+// Helper to create a PCM audio blob for the Gemini API
+function createPcmBlob(data: Float32Array): GenaiBlob {
+  const l = data.length;
+  const int16 = new Int16Array(l);
+  for (let i = 0; i < l; i++) {
+    int16[i] = data[i] * 32768;
+  }
+  return {
+    data: encodeToBase64(new Uint8Array(int16.buffer)),
+    mimeType: 'audio/pcm;rate=16000',
+  };
+}
+
 
 // Helper function to decode raw PCM audio data into an AudioBuffer
 async function decodePcmAudioData(
@@ -54,17 +82,36 @@ const App: React.FC = () => {
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>('dark');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [view, setView] = useState<'chat' | 'about'>('chat');
+  const [view, setView] = useState<'chat' | 'settings'>('chat');
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
-  const streamRef = useRef<MediaStream | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [playingAudioMessageId, setPlayingAudioMessageId] = useState<string | null>(null);
   const [isLoadingAudioMessageId, setIsLoadingAudioMessageId] = useState<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const [showWelcomeModal, setShowWelcomeModal] = useState(false);
+  const [previewMedia, setPreviewMedia] = useState<{ url: string; type: 'image' | 'video' } | null>(null);
+  
+  // Personalization State
+  const [isMemoryOn, setIsMemoryOn] = useState(true);
+  const [isChatHistoryOn, setIsChatHistoryOn] = useState(true);
+  
+  // Voice Agent State
+  const [isVoiceAgentMode, setIsVoiceAgentMode] = useState(false);
+  const [voiceAgentStatus, setVoiceAgentStatus] = useState('idle');
+  const liveSessionPromiseRef = useRef<Promise<LiveSession> | null>(null);
+  const liveStreamRef = useRef<MediaStream | null>(null);
+  const inputAudioContextRef = useRef<AudioContext | null>(null);
+  const outputAudioContextRef = useRef<AudioContext | null>(null);
+  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const inputSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const nextStartTimeRef = useRef(0);
+  const audioPlaybackSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const currentInputTranscriptionRef = useRef('');
+  const currentOutputTranscriptionRef = useRef('');
 
 
   // Check login status on initial load
@@ -78,6 +125,14 @@ const App: React.FC = () => {
     const savedTheme = localStorage.getItem('theme') as 'light' | 'dark' | null;
     if (savedTheme) {
       setTheme(savedTheme);
+    }
+    const savedMemory = localStorage.getItem('isMemoryOn');
+    if (savedMemory) {
+      setIsMemoryOn(savedMemory === 'true');
+    }
+    const savedHistory = localStorage.getItem('isChatHistoryOn');
+    if (savedHistory) {
+        setIsChatHistoryOn(savedHistory === 'true');
     }
   }, []);
 
@@ -96,6 +151,20 @@ const App: React.FC = () => {
 
   const handleToggleTheme = () => {
     setTheme(prevTheme => (prevTheme === 'dark' ? 'light' : 'dark'));
+  };
+
+  const handleToggleMemory = () => {
+    const newValue = !isMemoryOn;
+    setIsMemoryOn(newValue);
+    localStorage.setItem('isMemoryOn', String(newValue));
+    clearChatCache();
+  };
+  
+  const handleToggleChatHistory = () => {
+    const newValue = !isChatHistoryOn;
+    setIsChatHistoryOn(newValue);
+    localStorage.setItem('isChatHistoryOn', String(newValue));
+    clearChatCache();
   };
 
   // Load sessions from localStorage on initial render
@@ -139,8 +208,12 @@ const App: React.FC = () => {
 
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatSessions, activeSessionId]);
+    // Automatically scroll to the latest message.
+    // Use 'auto' for instant scrolling during streaming, and 'smooth' for a nicer effect on user send.
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: isLoading ? 'auto' : 'smooth' });
+    }
+  }, [chatSessions, activeSessionId, isLoading]);
   
   const handleNewChat = () => {
     setIsLoading(false);
@@ -193,12 +266,21 @@ const App: React.FC = () => {
   };
 
   const handleLogin = () => {
+    const hasSeenWelcome = localStorage.getItem('hasSeenWelcomeModal') === 'true';
+    if (!hasSeenWelcome) {
+      setShowWelcomeModal(true);
+    }
     localStorage.setItem('isLoggedIn', 'true');
     setIsLoggedIn(true);
   };
   
   const handleLogout = () => {
     setShowLogoutConfirm(true);
+  };
+  
+  const handleCloseWelcomeModal = () => {
+    setShowWelcomeModal(false);
+    localStorage.setItem('hasSeenWelcomeModal', 'true');
   };
 
   const confirmLogout = () => {
@@ -216,7 +298,6 @@ const App: React.FC = () => {
     } else {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        streamRef.current = stream;
         mediaRecorderRef.current = new MediaRecorder(stream);
         audioChunksRef.current = [];
 
@@ -233,8 +314,7 @@ const App: React.FC = () => {
           setInput(prev => (prev ? prev + ' ' : '') + transcribedText);
           setIsTranscribing(false);
 
-          streamRef.current?.getTracks().forEach(track => track.stop());
-          streamRef.current = null;
+          stream.getTracks().forEach(track => track.stop());
         };
         
         mediaRecorderRef.current.start();
@@ -247,10 +327,11 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    if (mediaRecorderRef.current?.state === 'recording') {
-        mediaRecorderRef.current.onstop = () => {
-            setIsRecording(false);
-        };
+    const recorder = mediaRecorderRef.current;
+    if (recorder?.state === 'recording') {
+        const stopRecording = () => setIsRecording(false);
+        recorder.addEventListener('stop', stopRecording);
+        return () => recorder.removeEventListener('stop', stopRecording);
     }
   }, []);
 
@@ -296,6 +377,161 @@ const App: React.FC = () => {
     }
   };
 
+  // Voice Agent Methods
+  const stopVoiceAgent = () => {
+    liveSessionPromiseRef.current?.then(session => session.close());
+    liveSessionPromiseRef.current = null;
+    
+    liveStreamRef.current?.getTracks().forEach(track => track.stop());
+    liveStreamRef.current = null;
+
+    scriptProcessorRef.current?.disconnect();
+    scriptProcessorRef.current = null;
+    inputSourceRef.current?.disconnect();
+    inputSourceRef.current = null;
+
+    inputAudioContextRef.current?.close().catch(console.error);
+    outputAudioContextRef.current?.close().catch(console.error);
+    inputAudioContextRef.current = null;
+    outputAudioContextRef.current = null;
+
+    audioPlaybackSourcesRef.current.forEach(source => source.stop());
+    audioPlaybackSourcesRef.current.clear();
+    nextStartTimeRef.current = 0;
+    
+    currentInputTranscriptionRef.current = '';
+    currentOutputTranscriptionRef.current = '';
+
+    setIsVoiceAgentMode(false);
+    setVoiceAgentStatus('idle');
+  };
+
+  const startVoiceAgent = async () => {
+    if (!process.env.API_KEY) {
+      alert("API Key is not configured.");
+      return;
+    }
+
+    setIsVoiceAgentMode(true);
+    setVoiceAgentStatus('connecting');
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      liveStreamRef.current = stream;
+
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+      const sessionPromise = ai.live.connect({
+        model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+        config: {
+          responseModalities: [Modality.AUDIO],
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+        },
+        callbacks: {
+          onopen: () => {
+            setVoiceAgentStatus('listening');
+            inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+            outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+            
+            const source = inputAudioContextRef.current.createMediaStreamSource(stream);
+            inputSourceRef.current = source;
+            
+            const scriptProcessor = inputAudioContextRef.current.createScriptProcessor(4096, 1, 1);
+            scriptProcessorRef.current = scriptProcessor;
+
+            scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
+              const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+              const pcmBlob = createPcmBlob(inputData);
+              liveSessionPromiseRef.current?.then((session) => {
+                session.sendRealtimeInput({ media: pcmBlob });
+              });
+            };
+            source.connect(scriptProcessor);
+            scriptProcessor.connect(inputAudioContextRef.current.destination);
+          },
+          onmessage: async (message: LiveServerMessage) => {
+            if (message.serverContent?.inputTranscription) {
+              currentInputTranscriptionRef.current += message.serverContent.inputTranscription.text;
+            }
+            if (message.serverContent?.outputTranscription) {
+              currentOutputTranscriptionRef.current += message.serverContent.outputTranscription.text;
+            }
+            if (message.serverContent?.turnComplete && activeSessionId) {
+              const userInput = currentInputTranscriptionRef.current.trim();
+              const aiResponse = currentOutputTranscriptionRef.current.trim();
+              
+              if (userInput || aiResponse) {
+                setChatSessions(prevSessions =>
+                  prevSessions.map(session => {
+                    if (session.id === activeSessionId) {
+                      const newMessages: Message[] = [];
+                      if (userInput) newMessages.push({ id: `user-voice-${Date.now()}`, sender: 'user', text: userInput });
+                      if (aiResponse) newMessages.push({ id: `ai-voice-${Date.now()}`, sender: 'ai', text: aiResponse });
+                      return { ...session, messages: [...session.messages, ...newMessages] };
+                    }
+                    return session;
+                  })
+                );
+              }
+              currentInputTranscriptionRef.current = '';
+              currentOutputTranscriptionRef.current = '';
+            }
+            if (message.serverContent?.interrupted) {
+              audioPlaybackSourcesRef.current.forEach(source => source.stop());
+              audioPlaybackSourcesRef.current.clear();
+              nextStartTimeRef.current = 0;
+            }
+            const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData.data;
+            if (base64Audio && outputAudioContextRef.current) {
+              setVoiceAgentStatus('speaking');
+              const audioBytes = decodeBase64(base64Audio);
+              const audioBuffer = await decodePcmAudioData(audioBytes, outputAudioContextRef.current);
+              
+              const currentTime = outputAudioContextRef.current.currentTime;
+              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, currentTime);
+
+              const sourceNode = outputAudioContextRef.current.createBufferSource();
+              sourceNode.buffer = audioBuffer;
+              sourceNode.connect(outputAudioContextRef.current.destination);
+              
+              sourceNode.onended = () => {
+                audioPlaybackSourcesRef.current.delete(sourceNode);
+                if (audioPlaybackSourcesRef.current.size === 0) {
+                  setVoiceAgentStatus('listening');
+                }
+              };
+              sourceNode.start(nextStartTimeRef.current);
+              nextStartTimeRef.current += audioBuffer.duration;
+              audioPlaybackSourcesRef.current.add(sourceNode);
+            }
+          },
+          onerror: (e: ErrorEvent) => {
+            console.error('Live session error:', e);
+            setVoiceAgentStatus('error');
+            stopVoiceAgent();
+          },
+          onclose: (e: CloseEvent) => {
+            stopVoiceAgent();
+          },
+        }
+      });
+      liveSessionPromiseRef.current = sessionPromise;
+    } catch (err) {
+      console.error('Failed to start voice agent:', err);
+      alert('Could not start voice agent. Please ensure you have a microphone and have granted permissions.');
+      stopVoiceAgent();
+    }
+  };
+
+  const handleToggleVoiceAgentMode = () => {
+    if (isVoiceAgentMode) {
+      stopVoiceAgent();
+    } else {
+      startVoiceAgent();
+    }
+  };
+
   const handleSendMessage = async () => {
     if ((!input.trim() && !videoFile && !imageFile) || isLoading || !activeSessionId) return;
 
@@ -329,16 +565,17 @@ const App: React.FC = () => {
       sources: [],
     };
 
+    // Check if it's the first user message before updating state
+    const currentSession = chatSessions.find(s => s.id === activeSessionId);
+    const isFirstUserMessage = currentSession ? currentSession.messages.filter(m => m.sender === 'user').length === 0 : false;
+    const sessionIdForTitle = activeSessionId; // Capture session ID for async title update
+
     setChatSessions(prevSessions =>
       prevSessions.map(session => {
-        if (session.id === activeSessionId) {
-          // If this is the first user message, update the title
-          const isFirstUserMessage = session.messages.filter(m => m.sender === 'user').length === 0;
-          const newTitle = isFirstUserMessage && input.trim() ? input.trim().substring(0, 30) : session.title;
-          
+        if (session.id === sessionIdForTitle) {
+          // Add new messages, title will be updated asynchronously
           return {
             ...session,
-            title: newTitle,
             messages: [...session.messages, userMessage, aiMessagePlaceholder],
           };
         }
@@ -346,6 +583,15 @@ const App: React.FC = () => {
       })
     );
     
+    // Asynchronously generate and set the title if it's the first message
+    if (isFirstUserMessage && input.trim()) {
+        generateChatTitle(input.trim()).then(newTitle => {
+            setChatSessions(prev => prev.map(session => 
+                session.id === sessionIdForTitle ? { ...session, title: newTitle } : session
+            ));
+        });
+    }
+
     const currentVideoFile = videoFile;
     const currentImageFile = imageFile;
     const currentInput = input;
@@ -363,12 +609,16 @@ const App: React.FC = () => {
     try {
       const stream = sendMessageStream(
         currentInput,
-        activeSessionId,
-        currentVideoFile,
-        currentImageFile,
-        currentIsImageGeneration,
-        currentAspectRatio,
-        currentIsThinkingMode,
+        sessionIdForTitle,
+        {
+          videoFile: currentVideoFile,
+          imageFile: currentImageFile,
+          isImageGeneration: currentIsImageGeneration,
+          aspectRatio: currentAspectRatio,
+          isThinkingMode: currentIsThinkingMode,
+          isMemoryOn,
+          isChatHistoryOn,
+        }
       );
       let fullResponse = '';
       let finalSources: GroundingChunk[] | undefined = undefined;
@@ -392,7 +642,7 @@ const App: React.FC = () => {
         
         setChatSessions(prevSessions =>
           prevSessions.map(session =>
-            session.id === activeSessionId
+            session.id === sessionIdForTitle
               ? {
                   ...session,
                   messages: session.messages.map(msg =>
@@ -409,7 +659,7 @@ const App: React.FC = () => {
       console.error('Failed to get response:', error);
       setChatSessions(prevSessions =>
         prevSessions.map(session =>
-          session.id === activeSessionId
+          session.id === sessionIdForTitle
             ? {
                 ...session,
                 messages: session.messages.map(msg =>
@@ -435,12 +685,17 @@ const App: React.FC = () => {
   const activeMessages = chatSessions.find(s => s.id === activeSessionId)?.messages || [];
   const isDark = theme === 'dark';
 
+  const handlePreview = (url: string, type: 'image' | 'video') => {
+    setPreviewMedia({ url, type });
+  };
+
   if (!isLoggedIn) {
     return <LoginScreen onLogin={handleLogin} />;
   }
 
   return (
     <div className="flex h-screen overflow-hidden">
+      {showWelcomeModal && <WelcomeModal theme={theme} onClose={handleCloseWelcomeModal} />}
       <Sidebar 
         onNewChat={handleNewChat} 
         sessions={chatSessions}
@@ -448,29 +703,15 @@ const App: React.FC = () => {
         onSelectSession={handleSelectSession}
         onClearHistory={handleClearHistory}
         theme={theme}
-        onToggleTheme={handleToggleTheme}
         onLogout={handleLogout}
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
-        onShowAbout={() => setView('about')}
+        onShowSettings={() => setView('settings')}
       />
       <div className="flex flex-col flex-1">
         <header className={`md:hidden flex items-center justify-between p-4 border-b transition-colors duration-300 ${isDark ? 'bg-gray-900 border-gray-700/50' : 'bg-white border-gray-200'}`}>
-          <div className="flex items-center">
-            <div className="w-10 h-10 flex items-center justify-center mr-3">
-              <svg className="w-8 h-8" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <defs>
-                      <linearGradient id="logo-gradient-mobile" x1="21" y1="3" x2="3" y2="21" gradientUnits="userSpaceOnUse">
-                          <stop stopColor="#6EE7B7"/>
-                          <stop offset="1" stopColor="#10B981"/>
-                      </linearGradient>
-                  </defs>
-                  <path d="M19.07,5.93 C17.2,4.06 14.68,3 12,3 C7.03,3 3,7.03 3,12 C3,16.97 7.03,21 12,21 C16.1,21 19.68,18.47 21,15" fill="none" stroke="url(#logo-gradient-mobile)" strokeWidth="3" strokeLinecap="round"/>
-                  <path d="M17.2,10.2C16.2,9.4 14.2,9.2 12.5,9.8C10.8,10.4 9.8,12 10.4,13.6C11,15.2 13,16 14.5,15.2" fill={isDark ? "#374151" : "#E5E7EB"}/>
-                  <path d="M16,7C14.5,6.5 12,7.5 11,9.5" stroke={isDark ? "white" : "#4B5563"} strokeWidth="1.5" strokeLinecap="round"/>
-              </svg>
-            </div>
-            <h1 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-800'}`}>Autonex AI</h1>
+          <div className="flex items-center h-10">
+             <AutonexBrand className="w-32 h-auto" isDark={isDark} />
           </div>
           <button onClick={() => setIsSidebarOpen(true)} className={`p-2 rounded-full transition-colors ${isDark ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`} aria-label="Open menu">
              <MenuIcon className="w-6 h-6" />
@@ -489,6 +730,7 @@ const App: React.FC = () => {
                     onPlayAudio={handlePlayAudio}
                     isPlayingAudio={playingAudioMessageId === msg.id}
                     isLoadingAudio={isLoadingAudioMessageId === msg.id}
+                    onPreview={handlePreview}
                   />
                 ))}
                 <div ref={chatEndRef} />
@@ -514,12 +756,32 @@ const App: React.FC = () => {
               isRecording={isRecording}
               isTranscribing={isTranscribing}
               onToggleRecording={handleToggleRecording}
+              isVoiceAgentMode={isVoiceAgentMode}
+              onToggleVoiceAgentMode={handleToggleVoiceAgentMode}
+              voiceAgentStatus={voiceAgentStatus}
             />
           </>
         ) : (
-          <AboutPage theme={theme} onBackToChat={() => setView('chat')} />
+          <SettingsPage 
+            theme={theme} 
+            onToggleTheme={handleToggleTheme} 
+            onBackToChat={() => setView('chat')}
+            isMemoryOn={isMemoryOn}
+            onToggleMemory={handleToggleMemory}
+            onClearMemory={() => console.log("Clearing memory...")}
+            isChatHistoryOn={isChatHistoryOn}
+            onToggleChatHistory={handleToggleChatHistory}
+          />
         )}
       </div>
+
+      {previewMedia && (
+        <PreviewModal 
+          media={previewMedia}
+          onClose={() => setPreviewMedia(null)}
+          theme={theme}
+        />
+      )}
 
       {showClearConfirm && (
         <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">

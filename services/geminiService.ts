@@ -3,7 +3,7 @@
 import { GoogleGenAI, Chat, Modality } from "@google/genai";
 import type { GroundingChunk } from '../types';
 
-const SYSTEM_INSTRUCTION = `You are Autonex AI — an advanced conversational and automation assistant developed by Autonex Agency.
+const BASE_SYSTEM_INSTRUCTION = `You are Autonex AI — an advanced conversational and automation assistant developed by Autonex Agency.
 
 Your purpose is to help users with intelligent automation, content creation, data analysis, and AI-powered business tools. 
 You must think logically, respond clearly, and act like a professional AI partner.
@@ -27,8 +27,16 @@ Your identity:
 Always respond like a professional AI product built by Autonex.
 Keep answers neat, structured, and helpful. Use markdown for formatting when appropriate (e.g., lists, bold text).`;
 
+const MEMORY_ON_INSTRUCTION = `\n\n**Personalization Rules:**\n- You MUST remember key details provided by the user (like their name, goals, preferences) across the conversation to provide a personalized and continuous experience. Act as if you have a persistent memory of this user.`;
+const MEMORY_OFF_INSTRUCTION = `\n\n**Personalization Rules:**\n- You MUST NOT remember any details about the user from previous messages. Treat each message as if it's from a new user. You have no memory of past interactions.`;
+
+
 let ai: GoogleGenAI;
 const chatInstances = new Map<string, Chat>();
+
+export function clearChatCache() {
+  chatInstances.clear();
+}
 
 function getAiInstance(): GoogleGenAI {
   if (!ai) {
@@ -40,7 +48,22 @@ function getAiInstance(): GoogleGenAI {
   return ai;
 }
 
-function getChat(sessionId: string): Chat {
+function getChat(sessionId: string, isMemoryOn: boolean, isChatHistoryOn: boolean): Chat {
+  const finalSystemInstruction = BASE_SYSTEM_INSTRUCTION + (isMemoryOn ? MEMORY_ON_INSTRUCTION : MEMORY_OFF_INSTRUCTION);
+
+  // If chat history is disabled, we don't use the cache and create a new instance every time.
+  if (!isChatHistoryOn) {
+    const genAI = getAiInstance();
+    return genAI.chats.create({
+      model: 'gemini-2.5-flash',
+      config: {
+        systemInstruction: finalSystemInstruction,
+        tools: [{googleSearch: {}}],
+      },
+    });
+  }
+
+  // If history is on, use the cache.
   if (chatInstances.has(sessionId)) {
     return chatInstances.get(sessionId)!;
   }
@@ -49,7 +72,7 @@ function getChat(sessionId: string): Chat {
   const newChat = genAI.chats.create({
     model: 'gemini-2.5-flash',
     config: {
-      systemInstruction: SYSTEM_INSTRUCTION,
+      systemInstruction: finalSystemInstruction,
       tools: [{googleSearch: {}}],
     },
   });
@@ -57,6 +80,31 @@ function getChat(sessionId: string): Chat {
   return newChat;
 }
 
+export async function generateChatTitle(userMessage: string): Promise<string> {
+  const genAI = getAiInstance();
+  try {
+    const response = await genAI.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: `Generate a short, descriptive chat title (max 4 words) for the following user query. Just return the title, nothing else:\n\n"${userMessage}"`,
+    });
+
+    let title = response.text.trim().replace(/^"|"$/g, '');
+    if (title.endsWith('.')) {
+      title = title.slice(0, -1);
+    }
+    
+    // If title is empty or too long (model might ignore instructions), fallback.
+    if (!title || title.length > 50) {
+        return userMessage.substring(0, 30);
+    }
+
+    return title;
+  } catch (error) {
+    console.error("Error generating chat title:", error);
+    // Fallback to original method on error
+    return userMessage.substring(0, 30);
+  }
+}
 
 export interface StreamPart {
   text?: string;
@@ -123,11 +171,23 @@ export async function transcribeAudio(audioFile: File): Promise<string> {
 export async function* sendMessageStream(
   message: string, 
   sessionId: string, 
-  videoFile?: File,
-  imageFile?: File,
-  isImageGeneration?: boolean,
-  aspectRatio?: '16:9' | '9:16',
-  isThinkingMode?: boolean,
+  {
+    videoFile,
+    imageFile,
+    isImageGeneration,
+    aspectRatio,
+    isThinkingMode,
+    isMemoryOn,
+    isChatHistoryOn,
+  }: {
+    videoFile?: File,
+    imageFile?: File,
+    isImageGeneration?: boolean,
+    aspectRatio?: '16:9' | '9:16',
+    isThinkingMode?: boolean,
+    isMemoryOn: boolean,
+    isChatHistoryOn: boolean,
+  }
 ): AsyncGenerator<StreamPart> {
   const genAI = getAiInstance();
 
@@ -216,7 +276,7 @@ export async function* sendMessageStream(
         model: 'gemini-2.5-pro',
         contents: message,
         config: {
-          systemInstruction: SYSTEM_INSTRUCTION,
+          systemInstruction: BASE_SYSTEM_INSTRUCTION,
           thinkingConfig: { thinkingBudget: 32768 },
         },
       });
@@ -233,7 +293,7 @@ export async function* sendMessageStream(
     return;
   }
 
-  const chat = getChat(sessionId);
+  const chat = getChat(sessionId, isMemoryOn, isChatHistoryOn);
 
   try {
     const result = await chat.sendMessageStream({ message });

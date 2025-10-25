@@ -1,7 +1,13 @@
-import React from 'react';
+
+import React, { useState } from 'react';
 import type { Message } from '../types';
 import SpeakerIcon from './icons/SpeakerIcon';
 import SpeakerWaveIcon from './icons/SpeakerWaveIcon';
+import CopyIcon from './icons/CopyIcon';
+import CheckIcon from './icons/CheckIcon';
+import AutonexIcon from './icons/AutonexIcon';
+import DownloadIcon from './icons/DownloadIcon';
+import MaximizeIcon from './icons/MaximizeIcon';
 
 interface ChatMessageProps {
   message: Message;
@@ -9,9 +15,11 @@ interface ChatMessageProps {
   onPlayAudio: (messageId: string, text: string) => void;
   isPlayingAudio: boolean;
   isLoadingAudio: boolean;
+  onPreview: (url: string, type: 'image' | 'video') => void;
 }
 
-const ChatMessage: React.FC<ChatMessageProps> = ({ message, theme, onPlayAudio, isPlayingAudio, isLoadingAudio }) => {
+const ChatMessage: React.FC<ChatMessageProps> = ({ message, theme, onPlayAudio, isPlayingAudio, isLoadingAudio, onPreview }) => {
+  const [isCopied, setIsCopied] = useState(false);
   const isAI = message.sender === 'ai';
   const isDark = theme === 'dark';
 
@@ -21,21 +29,42 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message, theme, onPlayAudio, 
     }
   };
 
+  const handleCopyClick = () => {
+    if (message.text) {
+      navigator.clipboard.writeText(message.text).then(() => {
+        setIsCopied(true);
+        setTimeout(() => setIsCopied(false), 2000);
+      }).catch(err => {
+        console.error('Failed to copy text: ', err);
+      });
+    }
+  };
+
+  const MediaControls: React.FC<{ url: string; type: 'image' | 'video'; filename: string }> = ({ url, type, filename }) => (
+    <div className="absolute bottom-2 right-2 flex items-center gap-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity duration-300">
+      <button
+        onClick={() => onPreview(url, type)}
+        className={`p-2 rounded-full transition-colors ${isDark ? 'bg-gray-900/60 text-gray-200 hover:bg-gray-800/80 backdrop-blur-sm' : 'bg-white/60 text-gray-700 hover:bg-white/80 backdrop-blur-sm'}`}
+        title="Preview"
+      >
+        <MaximizeIcon className="w-4 h-4" />
+      </button>
+      <a
+        href={url}
+        download={filename}
+        className={`p-2 rounded-full transition-colors ${isDark ? 'bg-gray-900/60 text-gray-200 hover:bg-gray-800/80 backdrop-blur-sm' : 'bg-white/60 text-gray-700 hover:bg-white/80 backdrop-blur-sm'}`}
+        title="Download"
+      >
+        <DownloadIcon className="w-4 h-4" />
+      </a>
+    </div>
+  );
+
   return (
     <div className={`flex items-start gap-4 ${isAI ? '' : 'justify-end'}`}>
       {isAI && (
         <div className="flex-shrink-0 w-8 h-8 flex items-center justify-center">
-          <svg className="w-full h-full" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-                <linearGradient id="logo-gradient-avatar" x1="21" y1="3" x2="3" y2="21" gradientUnits="userSpaceOnUse">
-                    <stop stopColor="#6EE7B7"/>
-                    <stop offset="1" stopColor="#10B981"/>
-                </linearGradient>
-            </defs>
-            <path d="M19.07,5.93 C17.2,4.06 14.68,3 12,3 C7.03,3 3,7.03 3,12 C3,16.97 7.03,21 12,21 C16.1,21 19.68,18.47 21,15" fill="none" stroke="url(#logo-gradient-avatar)" strokeWidth="3" strokeLinecap="round"/>
-            <path d="M17.2,10.2C16.2,9.4 14.2,9.2 12.5,9.8C10.8,10.4 9.8,12 10.4,13.6C11,15.2 13,16 14.5,15.2" fill={isDark ? "#374151" : "#E5E7EB"}/>
-            <path d="M16,7C14.5,6.5 12,7.5 11,9.5" stroke={isDark ? "white" : "#4B5563"} strokeWidth="1.5" strokeLinecap="round"/>
-          </svg>
+          <AutonexIcon isDark={isDark} />
         </div>
       )}
       <div
@@ -46,23 +75,27 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message, theme, onPlayAudio, 
         }`}
       >
         {message.videoUrl && (
-            <div className="mb-2 rounded-lg overflow-hidden">
+            <div className="mb-2 rounded-lg overflow-hidden relative group">
                 <video src={message.videoUrl} className="w-full max-h-64" controls/>
+                <MediaControls url={message.videoUrl} type="video" filename="autonex-video.mp4" />
             </div>
         )}
         {message.imageUrl && (
-            <div className="mb-2 rounded-lg overflow-hidden">
+            <div className="mb-2 rounded-lg overflow-hidden relative group">
                 <img src={message.imageUrl} alt="User upload" className="w-full max-h-64 object-contain" />
+                <MediaControls url={message.imageUrl} type="image" filename="uploaded-image.png" />
             </div>
         )}
         {message.editedImageUrl && (
-            <div className="mb-2 rounded-lg overflow-hidden">
+            <div className="mb-2 rounded-lg overflow-hidden relative group">
                 <img src={message.editedImageUrl} alt="AI edited image" className="w-full max-h-80 object-contain" />
+                <MediaControls url={message.editedImageUrl} type="image" filename="autonex-edited-image.jpg" />
             </div>
         )}
         {message.generatedImageUrl && (
-            <div className="mb-2 rounded-lg overflow-hidden">
+            <div className="mb-2 rounded-lg overflow-hidden relative group">
                 <img src={message.generatedImageUrl} alt="AI generated image" className="w-full max-h-96 object-contain" />
+                <MediaControls url={message.generatedImageUrl} type="image" filename="autonex-generated-image.jpg" />
             </div>
         )}
         <div className="text-sm leading-relaxed whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: message.text.replace(/\n/g, '<br />') }}></div>
@@ -87,20 +120,35 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message, theme, onPlayAudio, 
           </div>
         )}
         {isAI && message.text && (
-          <button 
-            onClick={handlePlayClick} 
-            disabled={isLoadingAudio}
-            className={`absolute -bottom-3 -right-3 w-7 h-7 flex items-center justify-center rounded-full border transition-all duration-200 disabled:opacity-50 ${isDark ? 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600' : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-200'}`}
-            aria-label="Play audio"
-          >
-            {isLoadingAudio ? (
-              <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
-            ) : isPlayingAudio ? (
-              <SpeakerWaveIcon className="w-4 h-4" />
-            ) : (
-              <SpeakerIcon className="w-4 h-4" />
-            )}
-          </button>
+          <>
+            <button
+              onClick={handleCopyClick}
+              className={`absolute -bottom-3 -left-3 w-7 h-7 flex items-center justify-center rounded-full border transition-all duration-200 ${
+                isCopied 
+                  ? 'bg-green-500 border-green-400 text-white'
+                  : (isDark ? 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600' : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-200')
+              }`}
+              aria-label={isCopied ? "Copied to clipboard" : "Copy message text"}
+              title={isCopied ? "Copied!" : "Copy"}
+            >
+              {isCopied ? <CheckIcon className="w-4 h-4" /> : <CopyIcon className="w-4 h-4" />}
+            </button>
+            <button 
+              onClick={handlePlayClick} 
+              disabled={isLoadingAudio}
+              className={`absolute -bottom-3 -right-3 w-7 h-7 flex items-center justify-center rounded-full border transition-all duration-200 disabled:opacity-50 ${isDark ? 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600' : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-200'}`}
+              aria-label="Play audio"
+              title="Play audio"
+            >
+              {isLoadingAudio ? (
+                <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
+              ) : isPlayingAudio ? (
+                <SpeakerWaveIcon className="w-4 h-4" />
+              ) : (
+                <SpeakerIcon className="w-4 h-4" />
+              )}
+            </button>
+          </>
         )}
       </div>
     </div>
