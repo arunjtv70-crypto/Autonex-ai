@@ -1,15 +1,25 @@
-
 import React from 'react';
 import type { Message } from '../types';
+import SpeakerIcon from './icons/SpeakerIcon';
+import SpeakerWaveIcon from './icons/SpeakerWaveIcon';
 
 interface ChatMessageProps {
   message: Message;
   theme: 'light' | 'dark';
+  onPlayAudio: (messageId: string, text: string) => void;
+  isPlayingAudio: boolean;
+  isLoadingAudio: boolean;
 }
 
-const ChatMessage: React.FC<ChatMessageProps> = ({ message, theme }) => {
+const ChatMessage: React.FC<ChatMessageProps> = ({ message, theme, onPlayAudio, isPlayingAudio, isLoadingAudio }) => {
   const isAI = message.sender === 'ai';
   const isDark = theme === 'dark';
+
+  const handlePlayClick = () => {
+    if (message.text) {
+      onPlayAudio(message.id, message.text);
+    }
+  };
 
   return (
     <div className={`flex items-start gap-4 ${isAI ? '' : 'justify-end'}`}>
@@ -29,7 +39,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message, theme }) => {
         </div>
       )}
       <div
-        className={`max-w-xl p-4 rounded-xl shadow-md transition-colors duration-300 ${
+        className={`relative max-w-xl p-4 rounded-xl shadow-md transition-colors duration-300 ${
           isAI
             ? (isDark ? 'bg-gray-800 text-gray-200' : 'bg-gray-100 text-gray-800') + ' rounded-tl-none'
             : 'bg-blue-600 text-white rounded-br-none'
@@ -75,6 +85,22 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message, theme }) => {
               ))}
             </ol>
           </div>
+        )}
+        {isAI && message.text && (
+          <button 
+            onClick={handlePlayClick} 
+            disabled={isLoadingAudio}
+            className={`absolute -bottom-3 -right-3 w-7 h-7 flex items-center justify-center rounded-full border transition-all duration-200 disabled:opacity-50 ${isDark ? 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600' : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-200'}`}
+            aria-label="Play audio"
+          >
+            {isLoadingAudio ? (
+              <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
+            ) : isPlayingAudio ? (
+              <SpeakerWaveIcon className="w-4 h-4" />
+            ) : (
+              <SpeakerIcon className="w-4 h-4" />
+            )}
+          </button>
         )}
       </div>
     </div>

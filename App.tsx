@@ -1,12 +1,46 @@
-
 import React, { useState, useRef, useEffect } from 'react';
 import type { Message, GroundingChunk, ChatSession } from './types';
-import { sendMessageStream } from './services/geminiService';
+import { sendMessageStream, transcribeAudio, generateSpeech } from './services/geminiService';
 import Sidebar from './components/Sidebar';
 import ChatMessage from './components/ChatMessage';
 import ChatInput from './components/ChatInput';
+import LoginScreen from './components/LoginScreen';
+import MenuIcon from './components/icons/MenuIcon';
+import XIcon from './components/icons/XIcon';
+import AboutPage from './components/AboutPage';
+
+// Helper function to decode Base64
+function decodeBase64(base64: string) {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
+// Helper function to decode raw PCM audio data into an AudioBuffer
+async function decodePcmAudioData(
+  data: Uint8Array,
+  ctx: AudioContext,
+): Promise<AudioBuffer> {
+  const sampleRate = 24000; // As per Gemini TTS docs
+  const numChannels = 1;
+  const dataInt16 = new Int16Array(data.buffer);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+  const channelData = buffer.getChannelData(0);
+  for (let i = 0; i < frameCount; i++) {
+    channelData[i] = dataInt16[i] / 32768.0;
+  }
+  return buffer;
+}
+
 
 const App: React.FC = () => {
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [input, setInput] = useState('');
@@ -17,9 +51,28 @@ const App: React.FC = () => {
   const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16'>('16:9');
   const [isThinkingMode, setIsThinkingMode] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [view, setView] = useState<'chat' | 'about'>('chat');
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const [playingAudioMessageId, setPlayingAudioMessageId] = useState<string | null>(null);
+  const [isLoadingAudioMessageId, setIsLoadingAudioMessageId] = useState<string | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
+
+  // Check login status on initial load
+  useEffect(() => {
+    const loggedInStatus = localStorage.getItem('isLoggedIn') === 'true';
+    setIsLoggedIn(loggedInStatus);
+  }, []);
+  
   // Load theme from localStorage
   useEffect(() => {
     const savedTheme = localStorage.getItem('theme') as 'light' | 'dark' | null;
@@ -28,9 +81,17 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Save theme to localStorage
+  // Save theme to localStorage and apply to body
   useEffect(() => {
     localStorage.setItem('theme', theme);
+    const body = document.body;
+    body.classList.remove('dark', 'bg-gray-900', 'text-gray-100', 'bg-gray-50', 'text-gray-800');
+    
+    if (theme === 'dark') {
+      body.classList.add('dark', 'bg-gray-900', 'text-gray-100');
+    } else {
+      body.classList.add('bg-gray-50', 'text-gray-800');
+    }
   }, [theme]);
 
   const handleToggleTheme = () => {
@@ -39,6 +100,7 @@ const App: React.FC = () => {
 
   // Load sessions from localStorage on initial render
   useEffect(() => {
+    if (!isLoggedIn) return; // Don't load sessions if not logged in
     try {
       const storedSessions = localStorage.getItem('chatSessions');
       if (storedSessions) {
@@ -58,10 +120,11 @@ const App: React.FC = () => {
       handleNewChat(); // Start fresh if storage is corrupt
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isLoggedIn]);
 
   // Save sessions to localStorage whenever they change
   useEffect(() => {
+    if (!isLoggedIn) return;
     if (chatSessions.length > 0) {
       localStorage.setItem('chatSessions', JSON.stringify(chatSessions));
     } else {
@@ -72,7 +135,7 @@ const App: React.FC = () => {
     } else {
       localStorage.removeItem('activeSessionId');
     }
-  }, [chatSessions, activeSessionId]);
+  }, [chatSessions, activeSessionId, isLoggedIn]);
 
 
   useEffect(() => {
@@ -86,6 +149,7 @@ const App: React.FC = () => {
     setImageFile(null);
     setIsImageGeneration(false);
     setIsThinkingMode(false);
+    setView('chat');
     
     const newSessionId = `session-${Date.now()}`;
     const newSession: ChatSession = {
@@ -95,7 +159,7 @@ const App: React.FC = () => {
         {
           id: 'initial-ai-message-reset',
           sender: 'ai',
-          text: "Hello! I am Autonex AI. How can I help? / नमस्ते! मैं ऑटोनिक्स एआई हूं। मैं आपकी क्या मदद कर सकता हूँ?",
+          text: "Hello! I am Autonex AI. How can I assist you today?",
         },
       ],
     };
@@ -112,6 +176,7 @@ const App: React.FC = () => {
     setImageFile(null);
     setIsImageGeneration(false);
     setIsThinkingMode(false);
+    setView('chat');
   };
   
   const handleClearHistory = () => {
@@ -127,6 +192,109 @@ const App: React.FC = () => {
     handleNewChat(); // Start a fresh session
   };
 
+  const handleLogin = () => {
+    localStorage.setItem('isLoggedIn', 'true');
+    setIsLoggedIn(true);
+  };
+  
+  const handleLogout = () => {
+    setShowLogoutConfirm(true);
+  };
+
+  const confirmLogout = () => {
+    localStorage.removeItem('isLoggedIn');
+    setIsLoggedIn(false);
+    setShowLogoutConfirm(false);
+    setChatSessions([]); // Clear sessions from state
+    setActiveSessionId(null);
+    setView('chat');
+  };
+
+  const handleToggleRecording = async () => {
+    if (isRecording) {
+      mediaRecorderRef.current?.stop();
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        streamRef.current = stream;
+        mediaRecorderRef.current = new MediaRecorder(stream);
+        audioChunksRef.current = [];
+
+        mediaRecorderRef.current.ondataavailable = (event) => {
+          audioChunksRef.current.push(event.data);
+        };
+
+        mediaRecorderRef.current.onstop = async () => {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          const audioFile = new File([audioBlob], "recording.webm", { type: 'audio/webm' });
+          
+          setIsTranscribing(true);
+          const transcribedText = await transcribeAudio(audioFile);
+          setInput(prev => (prev ? prev + ' ' : '') + transcribedText);
+          setIsTranscribing(false);
+
+          streamRef.current?.getTracks().forEach(track => track.stop());
+          streamRef.current = null;
+        };
+        
+        mediaRecorderRef.current.start();
+        setIsRecording(true);
+      } catch (err) {
+        console.error('Error accessing microphone:', err);
+        alert('Microphone access was denied. Please allow microphone access in your browser settings to use this feature.');
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (mediaRecorderRef.current?.state === 'recording') {
+        mediaRecorderRef.current.onstop = () => {
+            setIsRecording(false);
+        };
+    }
+  }, []);
+
+  const handlePlayAudio = async (messageId: string, text: string) => {
+    if (audioSourceRef.current) {
+        audioSourceRef.current.stop();
+        audioSourceRef.current = null;
+    }
+
+    if (playingAudioMessageId === messageId) {
+        setPlayingAudioMessageId(null);
+        return;
+    }
+
+    setPlayingAudioMessageId(null);
+    setIsLoadingAudioMessageId(messageId);
+
+    try {
+        const base64Audio = await generateSpeech(text);
+        if (base64Audio) {
+            if (!audioContextRef.current) {
+                // FIX: Cast `window` to `any` to access `webkitAudioContext` without TypeScript errors.
+                audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+            }
+            const decodedBytes = decodeBase64(base64Audio);
+            const audioBuffer = await decodePcmAudioData(decodedBytes, audioContextRef.current);
+
+            const source = audioContextRef.current.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContextRef.current.destination);
+            source.onended = () => {
+                setPlayingAudioMessageId(null);
+                audioSourceRef.current = null;
+            };
+            source.start();
+            audioSourceRef.current = source;
+            setPlayingAudioMessageId(messageId);
+        }
+    } catch (error) {
+        console.error("Failed to play audio:", error);
+    } finally {
+        setIsLoadingAudioMessageId(null);
+    }
+  };
 
   const handleSendMessage = async () => {
     if ((!input.trim() && !videoFile && !imageFile) || isLoading || !activeSessionId) return;
@@ -267,8 +435,12 @@ const App: React.FC = () => {
   const activeMessages = chatSessions.find(s => s.id === activeSessionId)?.messages || [];
   const isDark = theme === 'dark';
 
+  if (!isLoggedIn) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
   return (
-    <div className={`relative flex h-screen transition-colors duration-300 ${isDark ? 'bg-gray-900 text-gray-100' : 'bg-gray-50 text-gray-800'}`}>
+    <div className="flex h-screen overflow-hidden">
       <Sidebar 
         onNewChat={handleNewChat} 
         sessions={chatSessions}
@@ -277,6 +449,10 @@ const App: React.FC = () => {
         onClearHistory={handleClearHistory}
         theme={theme}
         onToggleTheme={handleToggleTheme}
+        onLogout={handleLogout}
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
+        onShowAbout={() => setView('about')}
       />
       <div className="flex flex-col flex-1">
         <header className={`md:hidden flex items-center justify-between p-4 border-b transition-colors duration-300 ${isDark ? 'bg-gray-900 border-gray-700/50' : 'bg-white border-gray-200'}`}>
@@ -296,37 +472,53 @@ const App: React.FC = () => {
             </div>
             <h1 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-800'}`}>Autonex AI</h1>
           </div>
-          <button onClick={handleNewChat} className={`p-2 rounded-full transition-colors ${isDark ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`} aria-label="New Chat">
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+          <button onClick={() => setIsSidebarOpen(true)} className={`p-2 rounded-full transition-colors ${isDark ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`} aria-label="Open menu">
+             <MenuIcon className="w-6 h-6" />
           </button>
         </header>
-
-        <main className="flex-1 overflow-y-auto p-6">
-          <div className="max-w-4xl mx-auto space-y-6">
-            {activeMessages.map((msg) => (
-              <ChatMessage key={msg.id} message={msg} theme={theme} />
-            ))}
-             <div ref={chatEndRef} />
-          </div>
-        </main>
         
-        <ChatInput 
-          input={input}
-          setInput={setInput}
-          sendMessage={handleSendMessage}
-          isLoading={isLoading}
-          videoFile={videoFile}
-          setVideoFile={setVideoFile}
-          imageFile={imageFile}
-          setImageFile={setImageFile}
-          isImageGeneration={isImageGeneration}
-          setIsImageGeneration={setIsImageGeneration}
-          aspectRatio={aspectRatio}
-          setAspectRatio={setAspectRatio}
-          isThinkingMode={isThinkingMode}
-          setIsThinkingMode={setIsThinkingMode}
-          theme={theme}
-        />
+        {view === 'chat' ? (
+          <>
+            <main className="flex-1 overflow-y-auto p-6">
+              <div className="max-w-4xl mx-auto space-y-6">
+                {activeMessages.map((msg) => (
+                  <ChatMessage 
+                    key={msg.id} 
+                    message={msg} 
+                    theme={theme} 
+                    onPlayAudio={handlePlayAudio}
+                    isPlayingAudio={playingAudioMessageId === msg.id}
+                    isLoadingAudio={isLoadingAudioMessageId === msg.id}
+                  />
+                ))}
+                <div ref={chatEndRef} />
+              </div>
+            </main>
+            
+            <ChatInput 
+              input={input}
+              setInput={setInput}
+              sendMessage={handleSendMessage}
+              isLoading={isLoading}
+              videoFile={videoFile}
+              setVideoFile={setVideoFile}
+              imageFile={imageFile}
+              setImageFile={setImageFile}
+              isImageGeneration={isImageGeneration}
+              setIsImageGeneration={setIsImageGeneration}
+              aspectRatio={aspectRatio}
+              setAspectRatio={setAspectRatio}
+              isThinkingMode={isThinkingMode}
+              setIsThinkingMode={setIsThinkingMode}
+              theme={theme}
+              isRecording={isRecording}
+              isTranscribing={isTranscribing}
+              onToggleRecording={handleToggleRecording}
+            />
+          </>
+        ) : (
+          <AboutPage theme={theme} onBackToChat={() => setView('chat')} />
+        )}
       </div>
 
       {showClearConfirm && (
@@ -346,6 +538,29 @@ const App: React.FC = () => {
                 className="px-6 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white font-semibold transition-colors"
               >
                 Clear
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showLogoutConfirm && (
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className={`rounded-xl p-8 shadow-2xl border max-w-sm text-center transition-colors duration-300 ${isDark ? 'bg-gray-800 border-gray-700/50' : 'bg-white border-gray-200'}`}>
+            <h2 className={`text-lg font-bold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>Confirm Logout</h2>
+            <p className={`text-sm mb-6 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Are you sure you want to log out? Your session will be ended.</p>
+            <div className="flex justify-center gap-4">
+              <button 
+                onClick={() => setShowLogoutConfirm(false)}
+                className={`px-6 py-2 rounded-lg font-semibold transition-colors ${isDark ? 'bg-gray-700 hover:bg-gray-600 text-white' : 'bg-gray-200 hover:bg-gray-300 text-gray-800'}`}
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={confirmLogout}
+                className="px-6 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition-colors"
+              >
+                Logout
               </button>
             </div>
           </div>

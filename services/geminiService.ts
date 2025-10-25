@@ -1,5 +1,3 @@
-
-
 // FIX: Corrected imports. `StreamPart` is defined locally, so its import is removed.
 // `GroundingChunk` is a local type and should be imported from `../types`.
 import { GoogleGenAI, Chat, Modality } from "@google/genai";
@@ -12,8 +10,8 @@ You must think logically, respond clearly, and act like a professional AI partne
 
 Your core traits are:
 - Fast, reliable, and professional.
-- You understand both English and Hindi, and you MUST reply in the same language the user uses.
-- Your tone is confident, helpful, and modern — like a human tech expert.
+- You are a multilingual assistant. Your initial greeting must be in English. For all subsequent turns, you MUST automatically detect the user's language and reply in that same language. If the user switches languages, you must switch your response language accordingly.
+- Your tone is confident, helpful, and modern — like a human tech expert. Maintain a polite, clear, and natural tone in every language.
 
 Your main functions are:
 1. Automate — Help users design chatbots, workflows, and process automation.
@@ -81,6 +79,45 @@ async function fileToGenerativePart(file: File) {
       mimeType: file.type,
     },
   };
+}
+
+export async function generateSpeech(text: string): Promise<string | null> {
+  const genAI = getAiInstance();
+  try {
+    const response = await genAI.models.generateContent({
+      model: "gemini-2.5-flash-preview-tts",
+      contents: [{ parts: [{ text: `Say: ${text}` }] }],
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: 'Kore' },
+          },
+        },
+      },
+    });
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    return base64Audio || null;
+  } catch (error) {
+    console.error("Error generating speech:", error);
+    return null;
+  }
+}
+
+export async function transcribeAudio(audioFile: File): Promise<string> {
+  const genAI = getAiInstance();
+  try {
+    const audioPart = await fileToGenerativePart(audioFile);
+    const textPart = { text: "Transcribe the following audio." };
+    const response = await genAI.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: { parts: [audioPart, textPart] },
+    });
+    return response.text;
+  } catch (error) {
+    console.error("Error with audio transcription:", error);
+    return "Sorry, I couldn't transcribe the audio. Please try again.";
+  }
 }
 
 export async function* sendMessageStream(

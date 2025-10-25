@@ -1,8 +1,10 @@
-
 import React, { useRef } from 'react';
 import PaperclipIcon from './icons/PaperclipIcon';
 import ImageIcon from './icons/ImageIcon';
 import ThinkingIcon from './icons/ThinkingIcon';
+import MicrophoneIcon from './icons/MicrophoneIcon';
+import StopCircleIcon from './icons/StopCircleIcon';
+
 
 interface ChatInputProps {
   input: string;
@@ -20,6 +22,9 @@ interface ChatInputProps {
   isThinkingMode: boolean;
   setIsThinkingMode: (isThinking: boolean) => void;
   theme: 'light' | 'dark';
+  isRecording: boolean;
+  isTranscribing: boolean;
+  onToggleRecording: () => void;
 }
 
 const ChatInput: React.FC<ChatInputProps> = ({
@@ -38,6 +43,9 @@ const ChatInput: React.FC<ChatInputProps> = ({
   isThinkingMode,
   setIsThinkingMode,
   theme,
+  isRecording,
+  isTranscribing,
+  onToggleRecording,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isDark = theme === 'dark';
@@ -73,6 +81,14 @@ const ChatInput: React.FC<ChatInputProps> = ({
   
   const attachedFile = videoFile || imageFile;
 
+  const activeModeClass = isImageGeneration ? 'border-blue-500/50 bg-blue-900/10' :
+                          isThinkingMode ? 'border-purple-500/50 bg-purple-900/10' :
+                          isDark ? 'border-transparent' : 'border-transparent';
+  
+  const darkActiveModeClass = isImageGeneration ? 'dark:bg-blue-900/20' :
+                              isThinkingMode ? 'dark:bg-purple-900/20' :
+                              '';
+  
   return (
     <div className={`border-t transition-colors duration-300 ${isDark ? 'bg-gray-800/50 border-gray-700/50' : 'bg-gray-50/50 border-gray-200'}`}>
        {attachedFile && (
@@ -117,63 +133,85 @@ const ChatInput: React.FC<ChatInputProps> = ({
         </div>
       )}
       <div className="p-4">
-        <div className="relative max-w-4xl mx-auto">
+        <div className={`relative max-w-4xl mx-auto rounded-lg border transition-all duration-300 ${activeModeClass} ${darkActiveModeClass}`}>
           <input
             type="file"
             ref={fileInputRef}
             onChange={handleFileChange}
             accept="video/*,image/*"
             className="hidden"
-            disabled={isLoading}
+            disabled={isLoading || isRecording || isTranscribing}
           />
-          <button
-            onClick={handleAttachClick}
-            disabled={isLoading || isImageGeneration || isThinkingMode}
-            className={`absolute left-3 top-1/2 -translate-y-1/2 p-2 rounded-full disabled:opacity-50 transition-colors ${isDark ? 'text-gray-400 hover:text-white hover:bg-gray-700' : 'text-gray-500 hover:text-gray-800 hover:bg-gray-200'}`}
-            aria-label="Attach file"
-          >
-            <PaperclipIcon className="w-5 h-5" />
-          </button>
-           <button
-            onClick={() => setIsImageGeneration(!isImageGeneration)}
-            disabled={isLoading || !!attachedFile || isThinkingMode}
-            className={`absolute left-12 top-1/2 -translate-y-1/2 p-2 rounded-full disabled:opacity-50 transition-colors ${
-              isImageGeneration 
-                ? 'text-blue-500 ' + (isDark ? 'bg-gray-700' : 'bg-gray-200')
-                : (isDark ? 'text-gray-400 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-200')
-            }`}
-            aria-label="Toggle Image Generation"
-          >
-            <ImageIcon className="w-5 h-5" />
-          </button>
-          <button
-            onClick={() => setIsThinkingMode(!isThinkingMode)}
-            disabled={isLoading || !!attachedFile || isImageGeneration}
-            className={`absolute left-21 top-1/2 -translate-y-1/2 p-2 rounded-full disabled:opacity-50 transition-colors ${
-              isThinkingMode 
-                ? 'text-purple-500 ' + (isDark ? 'bg-gray-700' : 'bg-gray-200')
-                : (isDark ? 'text-gray-400 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-200')
-            }`}
-            aria-label="Toggle Thinking Mode"
-          >
-            <ThinkingIcon className="w-5 h-5" />
-          </button>
+          <div className="absolute left-0 top-1/2 -translate-y-1/2 h-full flex items-center pl-2">
+            <div className="flex items-center gap-0.5">
+              <button
+                onClick={handleAttachClick}
+                disabled={isLoading || isImageGeneration || isThinkingMode || isRecording || isTranscribing}
+                className={`p-2 rounded-full disabled:opacity-50 transition-colors ${isDark ? 'text-gray-400 hover:text-white hover:bg-gray-700' : 'text-gray-500 hover:text-gray-800 hover:bg-gray-200'}`}
+                aria-label="Attach file"
+              >
+                <PaperclipIcon className="w-5 h-5" />
+              </button>
+              <button
+                onClick={() => setIsImageGeneration(!isImageGeneration)}
+                disabled={isLoading || !!attachedFile || isThinkingMode || isRecording || isTranscribing}
+                className={`p-2 rounded-full disabled:opacity-50 transition-colors ${
+                  isImageGeneration 
+                    ? 'text-blue-500 bg-blue-500/20'
+                    : (isDark ? 'text-gray-400 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-200')
+                }`}
+                aria-label="Toggle Image Generation"
+              >
+                <ImageIcon className="w-5 h-5" />
+              </button>
+              <button
+                onClick={() => setIsThinkingMode(!isThinkingMode)}
+                disabled={isLoading || !!attachedFile || isImageGeneration || isRecording || isTranscribing}
+                className={`p-2 rounded-full disabled:opacity-50 transition-colors ${
+                  isThinkingMode 
+                    ? 'text-purple-500 bg-purple-500/20'
+                    : (isDark ? 'text-gray-400 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-200')
+                }`}
+                aria-label="Toggle Thinking Mode"
+              >
+                <ThinkingIcon className="w-5 h-5" />
+              </button>
+              <button
+                onClick={onToggleRecording}
+                disabled={isLoading || !!attachedFile || isImageGeneration || isThinkingMode || isTranscribing}
+                className={`p-2 rounded-full disabled:opacity-50 transition-colors relative ${
+                  isRecording 
+                    ? 'text-red-500 bg-red-500/20'
+                    : (isDark ? 'text-gray-400 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-200')
+                }`}
+                aria-label={isRecording ? 'Stop recording' : 'Start recording'}
+              >
+                {isRecording ? <StopCircleIcon className="w-5 h-5" /> : <MicrophoneIcon className="w-5 h-5" />}
+                {isRecording && <span className="absolute top-0 right-0 w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>}
+                {isTranscribing && <div className="absolute inset-0 flex items-center justify-center"><div className="w-5 h-5 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div></div>}
+              </button>
+            </div>
+          </div>
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={
-              isImageGeneration 
+              isRecording
+                ? "Recording... Click to stop."
+                : isTranscribing
+                ? "Transcribing audio..."
+                : isImageGeneration 
                 ? "Describe the image you want to create..." 
                 : isThinkingMode
                 ? "Ask a complex question..."
                 : attachedFile 
                 ? "Describe your request for the attached file..." 
-                : "Ask Autonex AI anything... / कुछ भी पूछें..."
+                : "Ask Autonex AI anything..."
             }
-            className={`w-full rounded-lg py-3 pl-32 pr-16 resize-none focus:ring-2 focus:ring-blue-500 focus:outline-none transition-shadow ${isDark ? 'bg-gray-700 text-gray-200 placeholder:text-gray-400' : 'bg-white text-gray-900 placeholder:text-gray-500'}`}
+            className={`w-full rounded-lg py-3 pl-[172px] pr-16 resize-none focus:ring-2 focus:ring-blue-500 focus:outline-none transition-shadow bg-transparent ${isDark ? 'text-gray-200 placeholder:text-gray-400' : 'text-gray-900 placeholder:text-gray-500'}`}
             rows={1}
-            disabled={isLoading}
+            disabled={isLoading || isRecording || isTranscribing}
           />
           <button
             onClick={sendMessage}
